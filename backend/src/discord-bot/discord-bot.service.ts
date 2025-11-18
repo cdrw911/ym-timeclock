@@ -1,15 +1,19 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   Client,
   GatewayIntentBits,
   REST,
   Routes,
   SlashCommandBuilder,
+  TextChannel,
 } from 'discord.js';
 import { AttendanceService } from '../attendance/attendance.service';
 import { AdvanceNoticeService } from '../advance-notice/advance-notice.service';
+import { ScoreService } from '../score/score.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { startOfWeek, endOfWeek, format } from 'date-fns';
 
 @Injectable()
 export class DiscordBotService implements OnModuleInit {
@@ -22,6 +26,7 @@ export class DiscordBotService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly attendanceService: AttendanceService,
     private readonly advanceNoticeService: AdvanceNoticeService,
+    private readonly scoreService: ScoreService,
   ) {}
 
   async onModuleInit() {
@@ -311,5 +316,319 @@ export class DiscordBotService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Failed to send notification: ${error.message}`);
     }
+  }
+
+  /**
+   * Send message to announcement channel
+   */
+  private async sendToChannel(channelId: string, message: string) {
+    if (!this.client || !this.client.isReady()) {
+      this.logger.warn('Discord bot not ready');
+      return;
+    }
+
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && channel.isTextBased()) {
+        await (channel as TextChannel).send(message);
+        this.logger.log(`Message sent to channel ${channelId}`);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to send message to channel: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check for users who haven't clocked in (runs at 08:45 - 15 minutes after standard start time)
+   */
+  @Cron('45 8 * * 1-5', { timeZone: 'Asia/Taipei' })
+  async checkMissingClockIn() {
+    if (!this.client || !this.client.isReady()) {
+      return;
+    }
+
+    this.logger.log('Checking for missing clock-in...');
+
+    try {
+      const today = new Date();
+      const users = await this.prisma.user.findMany({
+        where: {
+          role: 'INTERN',
+          isActive: true,
+          discordId: { not: null },
+        },
+        include: {
+          internshipTerms: {
+            where: {
+              status: 'CONFIRMED',
+              startDate: { lte: today },
+              endDate: { gte: today },
+            },
+          },
+        },
+      });
+
+      for (const user of users) {
+        if (!user.discordId || user.internshipTerms.length === 0) continue;
+
+        // Check if user has clocked in today
+        const todayStart = new Date(today.setHours(0, 0, 0, 0));
+        const events = await this.prisma.attendanceEvent.findMany({
+          where: {
+            userId: user.id,
+            timestamp: { gte: todayStart },
+            type: { in: ['WORK_ONSITE_START', 'WORK_REMOTE_START'] },
+          },
+        });
+
+        if (events.length === 0) {
+          await this.sendNotification(
+            user.discordId,
+            `⚠️ 提醒：您今天還沒有打卡！\n請盡快使用 /in 指令或至網頁打卡。`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error(`Failed to check missing clock-in: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check for users who haven't clocked out (runs at 18:30 - 30 minutes after standard end time)
+   */
+  @Cron('30 18 * * 1-5', { timeZone: 'Asia/Taipei' })
+  async checkMissingClockOut() {
+    if (!this.client || !this.client.isReady()) {
+      return;
+    }
+
+    this.logger.log('Checking for missing clock-out...');
+
+    try {
+      const today = new Date();
+      const todayStart = new Date(today.setHours(0, 0, 0, 0));
+
+      const users = await this.prisma.user.findMany({
+        where: {
+          role: 'INTERN',
+          isActive: true,
+          discordId: { not: null },
+        },
+      });
+
+      for (const user of users) {
+        if (!user.discordId) continue;
+
+        // Check if user has clocked in but not out
+        const events = await this.prisma.attendanceEvent.findMany({
+          where: {
+            userId: user.id,
+            timestamp: { gte: todayStart },
+          },
+          orderBy: { timestamp: 'desc' },
+        });
+
+        if (events.length > 0) {
+          const lastEvent = events[0];
+          if (
+            lastEvent.type === 'WORK_ONSITE_START' ||
+            lastEvent.type === 'WORK_REMOTE_START' ||
+            lastEvent.type === 'BREAK_OFFSITE_END'
+          ) {
+            await this.sendNotification(
+              user.discordId,
+              `⚠️ 提醒：您今天還沒有下班打卡！\n請記得使用 /out 指令或至網頁打卡。`,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error(`Failed to check missing clock-out: ${error.message}`);
+    }
+  }
+
+  /**
+   * Send weekly summary (runs every Monday at 9:00)
+   */
+  @Cron('0 9 * * 1', { timeZone: 'Asia/Taipei' })
+  async sendWeeklySummary() {
+    if (!this.client || !this.client.isReady()) {
+      return;
+    }
+
+    this.logger.log('Sending weekly summary...');
+
+    try {
+      const channelId = this.configService.get<string>('DISCORD_ANNOUNCEMENT_CHANNEL_ID');
+      if (!channelId || channelId === 'your-channel-id') {
+        this.logger.warn('Announcement channel not configured');
+        return;
+      }
+
+      const now = new Date();
+      const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+      const weekEnd = endOfWeek(now, { weekStartsOn: 1 });
+
+      // Get all active interns
+      const users = await this.prisma.user.findMany({
+        where: {
+          role: 'INTERN',
+          isActive: true,
+        },
+      });
+
+      let message = `📊 **上週出勤統計** (${format(weekStart, 'yyyy-MM-dd')} ~ ${format(weekEnd, 'yyyy-MM-dd')})\n\n`;
+
+      for (const user of users) {
+        const summaries = await this.prisma.daySummary.findMany({
+          where: {
+            userId: user.id,
+            date: {
+              gte: weekStart,
+              lte: weekEnd,
+            },
+          },
+        });
+
+        const totalHours = summaries.reduce((sum, s) => sum + s.totalWorkSeconds, 0) / 3600;
+        const lateDays = summaries.filter((s) => s.isLate).length;
+        const earlyLeaveDays = summaries.filter((s) => s.isEarlyLeave).length;
+
+        message += `**${user.name}** (${user.code}):\n`;
+        message += `  出勤: ${summaries.length} 天 | 總工時: ${totalHours.toFixed(1)}h\n`;
+        if (lateDays > 0) message += `  ⚠️ 遲到: ${lateDays} 次\n`;
+        if (earlyLeaveDays > 0) message += `  ⚠️ 早退: ${earlyLeaveDays} 次\n`;
+        message += `\n`;
+      }
+
+      message += `\n請持續保持良好的出勤習慣！💪`;
+
+      await this.sendToChannel(channelId, message);
+    } catch (error) {
+      this.logger.error(`Failed to send weekly summary: ${error.message}`);
+    }
+  }
+
+  /**
+   * Send monthly score ranking (runs on the 1st of every month at 10:00)
+   */
+  @Cron('0 10 1 * *', { timeZone: 'Asia/Taipei' })
+  async sendMonthlyScoreRanking() {
+    if (!this.client || !this.client.isReady()) {
+      return;
+    }
+
+    this.logger.log('Sending monthly score ranking...');
+
+    try {
+      const channelId = this.configService.get<string>('DISCORD_ANNOUNCEMENT_CHANNEL_ID');
+      if (!channelId || channelId === 'your-channel-id') {
+        this.logger.warn('Announcement channel not configured');
+        return;
+      }
+
+      const lastMonth = new Date();
+      lastMonth.setMonth(lastMonth.getMonth() - 1);
+      const yearMonth = format(lastMonth, 'yyyy-MM');
+
+      // Get all scores for last month
+      const scores = await this.prisma.scoreRecord.findMany({
+        where: {
+          yearMonth,
+          status: 'FINAL',
+        },
+        include: {
+          user: true,
+        },
+        orderBy: {
+          finalScore: 'desc',
+        },
+      });
+
+      let message = `🏆 **${yearMonth} 出勤分數排行榜**\n\n`;
+
+      scores.forEach((score, index) => {
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+        const grade = this.getGrade(score.finalScore);
+
+        message += `${medal} **${score.user.name}** - ${score.finalScore.toFixed(1)}分 (${grade})\n`;
+      });
+
+      message += `\n恭喜上榜的實習生！繼續加油！🎉`;
+
+      await this.sendToChannel(channelId, message);
+
+      // Also send individual notifications
+      for (const score of scores) {
+        if (score.user.discordId) {
+          const details = await this.prisma.scoreDetail.findMany({
+            where: { scoreRecordId: score.id },
+          });
+
+          let userMessage = `📊 **您的 ${yearMonth} 出勤分數**\n\n`;
+          userMessage += `總分: **${score.finalScore.toFixed(1)}** / 100\n`;
+          userMessage += `排名: ${scores.findIndex((s) => s.id === score.id) + 1} / ${scores.length}\n`;
+          userMessage += `等第: ${this.getGrade(score.finalScore)}\n\n`;
+
+          if (details.length > 0) {
+            userMessage += `扣分明細:\n`;
+            details.forEach((d) => {
+              if (d.pointsDelta < 0) {
+                userMessage += `  • ${d.reasonType}: ${d.pointsDelta} (${format(d.relatedDate, 'MM/dd')})\n`;
+              }
+            });
+          }
+
+          if (score.bonusPoints > 0) {
+            userMessage += `\n✨ 獎勵加分: +${score.bonusPoints}\n`;
+          }
+
+          await this.sendNotification(score.user.discordId, userMessage);
+        }
+      }
+    } catch (error) {
+      this.logger.error(`Failed to send monthly score ranking: ${error.message}`);
+    }
+  }
+
+  /**
+   * Notify user when leave/retro request is reviewed
+   */
+  async notifyRequestReviewed(
+    userId: string,
+    type: 'leave' | 'retro',
+    status: 'approved' | 'rejected',
+    notes?: string,
+  ) {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+      });
+
+      if (!user || !user.discordId) {
+        return;
+      }
+
+      const typeText = type === 'leave' ? '請假' : '補打卡';
+      const statusText = status === 'approved' ? '✅ 已核准' : '❌ 已駁回';
+
+      let message = `${statusText} - 您的${typeText}申請\n`;
+      if (notes) {
+        message += `\n審核備註: ${notes}`;
+      }
+
+      await this.sendNotification(user.discordId, message);
+    } catch (error) {
+      this.logger.error(`Failed to notify request reviewed: ${error.message}`);
+    }
+  }
+
+  private getGrade(score: number): string {
+    if (score >= 95) return 'A+';
+    if (score >= 90) return 'A';
+    if (score >= 85) return 'B+';
+    if (score >= 80) return 'B';
+    if (score >= 75) return 'C';
+    return 'D';
   }
 }

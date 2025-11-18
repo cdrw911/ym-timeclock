@@ -4,66 +4,56 @@ services:
   # PostgreSQL Database
   db:
     image: postgres:16-alpine
-    container_name: timeclock-db
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: timeclock
       POSTGRES_USER: timeclock
-      POSTGRES_PASSWORD: timeclock
+      POSTGRES_PASSWORD: timeclock_dev
+      POSTGRES_DB: timeclock
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U timeclock"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
 
-  # Backend API
+  # Backend API (NestJS)
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    container_name: timeclock-backend
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://timeclock:timeclock@db:5432/timeclock?schema=public
-      NODE_ENV: development
-      PORT: 3000
+      dockerfile: Dockerfile.dev
     ports:
       - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://timeclock:timeclock_dev@db:5432/timeclock
+      JWT_SECRET: your-jwt-secret-change-in-production
+      NODE_ENV: development
     volumes:
       - ./backend:/app
       - /app/node_modules
+      - /app/dist
+    depends_on:
+      db:
+        condition: service_healthy
     command: npm run start:dev
 
-  # Discord Bot (will be added later)
-  # discord-bot:
-  #   build:
-  #     context: ./discord-bot
-  #     dockerfile: Dockerfile
-  #   container_name: timeclock-discord-bot
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - backend
-  #   env_file:
-  #     - ./discord-bot/.env
-
-  # Frontend (will be added later)
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   container_name: timeclock-frontend
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3001:3000"
-  #   depends_on:
-  #     - backend
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3001:3001"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
 
 volumes:
   postgres_data:

@@ -42,10 +42,12 @@ model User {
   retroClockRequests    RetroClockRequest[]
   scoreRecords          ScoreRecord[]
   advanceNotices        AdvanceNotice[]
-  auditLogs             AuditLog[]
-  approvedLeaveRequests LeaveRequest[]        @relation("LeaveApprover")
-  approvedRetroRequests RetroClockRequest[]   @relation("RetroApprover")
-  configUpdates         SystemConfig[]
+  auditLogs              AuditLog[]
+  approvedLeaveRequests  LeaveRequest[]        @relation("LeaveApprover")
+  approvedRetroRequests  RetroClockRequest[]   @relation("RetroApprover")
+  configUpdates          SystemConfig[]
+  scheduleChangeRequests ScheduleChangeRequest[]
+  approvedScheduleChanges ScheduleChangeRequest[] @relation("ScheduleChangeApprover")
 
   @@map("users")
 }
@@ -336,6 +338,70 @@ model SystemConfig {
 
   @@index([category])
   @@map("system_configs")
+}
+
+// ============================================
+// Schedule Change Request
+// ============================================
+
+enum ScheduleChangeType {
+  PERMANENT  // 永久調整班表
+  TEMPORARY  // 臨時調整（單日或單週）
+}
+
+model ScheduleChangeRequest {
+  id              String             @id @default(uuid())
+  userId          String             @map("user_id")
+  type            ScheduleChangeType
+  effectiveFrom   DateTime           @map("effective_from")
+  effectiveTo     DateTime?          @map("effective_to") // For TEMPORARY changes
+  originalSchedule Json              @map("original_schedule")
+  newSchedule     Json               @map("new_schedule")
+  reason          String             @db.Text
+  status          RequestStatus      @default(PENDING)
+  approverId      String?            @map("approver_id")
+  reviewNotes     String?            @map("review_notes") @db.Text
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  // Relations
+  user     User  @relation(fields: [userId], references: [id])
+  approver User? @relation("ScheduleChangeApprover", fields: [approverId], references: [id])
+
+  @@index([userId, status])
+  @@index([effectiveFrom, effectiveTo])
+  @@map("schedule_change_requests")
+}
+
+// ============================================
+// Anomaly Detection
+// ============================================
+
+enum AnomalyType {
+  MISSING_CLOCK_IN
+  MISSING_CLOCK_OUT
+  ABNORMAL_WORK_HOURS_SHORT
+  ABNORMAL_WORK_HOURS_LONG
+  SUSPICIOUS_IP_ACCESS
+  FREQUENT_RETRO_CLOCK
+}
+
+model AnomalyRecord {
+  id          String      @id @default(uuid())
+  userId      String      @map("user_id")
+  type        AnomalyType
+  date        DateTime
+  description String      @db.Text
+  metadata    Json        // IP address, duration, etc.
+  severity    String      // low, medium, high
+  resolved    Boolean     @default(false)
+  resolvedAt  DateTime?   @map("resolved_at")
+  resolvedBy  String?     @map("resolved_by")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  @@index([userId, date])
+  @@index([type, resolved])
+  @@map("anomaly_records")
 }
 
 // ============================================
