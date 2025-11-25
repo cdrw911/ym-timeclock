@@ -1,0 +1,426 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// User Management
+// ============================================
+
+enum UserRole {
+  INTERN
+  ADMIN
+  SYSTEM_ADMIN
+}
+
+model User {
+  id               String    @id @default(uuid())
+  code             String    @unique // e.g., I86
+  name             String
+  email            String    @unique
+  role             UserRole  @default(INTERN)
+  isActive         Boolean   @default(true) @map("is_active")
+  accessToken      String?   @unique @map("access_token") // Personal page token
+  tokenExpiresAt   DateTime? @map("token_expires_at")
+  discordId        String?   @unique @map("discord_id")
+  googleAccount    String?   @map("google_account")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  internshipTerms       InternshipTerm[]
+  attendanceEvents      AttendanceEvent[]
+  daySummaries          DaySummary[]
+  leaveRequests         LeaveRequest[]
+  retroClockRequests    RetroClockRequest[]
+  scoreRecords          ScoreRecord[]
+  advanceNotices        AdvanceNotice[]
+  auditLogs              AuditLog[]
+  approvedLeaveRequests  LeaveRequest[]        @relation("LeaveApprover")
+  approvedRetroRequests  RetroClockRequest[]   @relation("RetroApprover")
+  configUpdates          SystemConfig[]
+  scheduleChangeRequests ScheduleChangeRequest[]
+  approvedScheduleChanges ScheduleChangeRequest[] @relation("ScheduleChangeApprover")
+
+  @@map("users")
+}
+
+// ============================================
+// Internship & Schedule
+// ============================================
+
+enum ScheduleStatus {
+  DRAFT
+  CONFIRMED
+  ARCHIVED
+}
+
+model InternshipTerm {
+  id           String         @id @default(uuid())
+  userId       String         @map("user_id")
+  startDate    DateTime       @map("start_date") @db.Date
+  endDate      DateTime       @map("end_date") @db.Date
+  baseSchedule Json           @map("base_schedule") // { "monday": { "start": "08:30", "end": "18:00" }, ... }
+  status       ScheduleStatus @default(DRAFT)
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("internship_terms")
+}
+
+// ============================================
+// Attendance Events
+// ============================================
+
+enum EventType {
+  WORK_ONSITE_START
+  WORK_ONSITE_END
+  WORK_REMOTE_START
+  WORK_REMOTE_END
+  BREAK_OFFSITE_START
+  BREAK_OFFSITE_END
+}
+
+enum EventSource {
+  WEB
+  DISCORD
+  ADMIN
+  RETRO_APPROVED
+}
+
+model AttendanceEvent {
+  id               String      @id @default(uuid())
+  userId           String      @map("user_id")
+  type             EventType
+  timestamp        DateTime
+  source           EventSource @default(WEB)
+  relatedRequestId String?     @map("related_request_id") // Link to RetroClockRequest
+  metadata         Json?       // { ip, user_agent, etc. }
+  createdAt        DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, timestamp])
+  @@map("attendance_events")
+}
+
+// ============================================
+// Daily Summary
+// ============================================
+
+model DaySummary {
+  id                    String   @id @default(uuid())
+  userId                String   @map("user_id")
+  date                  DateTime @db.Date
+  workOnsiteSeconds     Int      @default(0) @map("work_onsite_seconds")
+  workRemoteSeconds     Int      @default(0) @map("work_remote_seconds")
+  totalWorkSeconds      Int      @default(0) @map("total_work_seconds")
+  scheduledWorkSeconds  Int      @default(0) @map("scheduled_work_seconds")
+  isLate                Boolean  @default(false) @map("is_late")
+  lateMinutes           Int      @default(0) @map("late_minutes")
+  isEarlyLeave          Boolean  @default(false) @map("is_early_leave")
+  earlyLeaveMinutes     Int      @default(0) @map("early_leave_minutes")
+  isAbsent              Boolean  @default(false) @map("is_absent")
+  lunchBreakSeconds     Int      @default(5400) @map("lunch_break_seconds") // Default 1.5 hours
+  breakOffsiteSeconds   Int      @default(0) @map("break_offsite_seconds")
+  hasAdvanceNotice      Boolean  @default(false) @map("has_advance_notice")
+  statusNotes           String?  @map("status_notes") @db.Text
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("day_summaries")
+}
+
+// ============================================
+// Leave Management
+// ============================================
+
+enum LeaveType {
+  SICK
+  MENSTRUAL
+  PERSONAL
+  OTHER
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model LeaveRequest {
+  id                    String        @id @default(uuid())
+  userId                String        @map("user_id")
+  startDatetime         DateTime      @map("start_datetime")
+  endDatetime           DateTime      @map("end_datetime")
+  type                  LeaveType
+  reason                String        @db.Text
+  hasAdvanceNotice      Boolean       @default(false) @map("has_advance_notice")
+  advanceNoticeDatetime DateTime?     @map("advance_notice_datetime")
+  status                RequestStatus @default(PENDING)
+  approverId            String?       @map("approver_id")
+  reviewNotes           String?       @map("review_notes") @db.Text
+  calendarEventId       String?       @map("calendar_event_id")
+  notionPageId          String?       @map("notion_page_id")
+  driveFileIds          Json?         @map("drive_file_ids") // Array of file IDs
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  user     User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  approver User? @relation("LeaveApprover", fields: [approverId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@map("leave_requests")
+}
+
+// ============================================
+// Retro Clock (补打卡)
+// ============================================
+
+enum RetroClockType {
+  WORK_ONSITE_START
+  WORK_ONSITE_END
+  WORK_REMOTE_START
+  WORK_REMOTE_END
+  BREAK_START
+  BREAK_END
+}
+
+model RetroClockRequest {
+  id              String          @id @default(uuid())
+  userId          String          @map("user_id")
+  date            DateTime        @db.Date
+  time            DateTime        @db.Time
+  type            RetroClockType
+  reason          String          @db.Text
+  improvementPlan String          @map("improvement_plan") @db.Text
+  status          RequestStatus   @default(PENDING)
+  approverId      String?         @map("approver_id")
+  reviewNotes     String?         @map("review_notes") @db.Text
+  driveFileIds    Json?           @map("drive_file_ids")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  user     User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  approver User? @relation("RetroApprover", fields: [approverId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@map("retro_clock_requests")
+}
+
+// ============================================
+// Scoring System
+// ============================================
+
+enum ScoreStatus {
+  CALCULATING
+  FINAL
+}
+
+model ScoreRecord {
+  id             String       @id @default(uuid())
+  userId         String       @map("user_id")
+  yearMonth      String       @map("year_month") // YYYY-MM
+  baseScore      Int          @default(100) @map("base_score")
+  totalDeduction Decimal      @default(0) @map("total_deduction") @db.Decimal(5, 2)
+  bonusPoints    Decimal      @default(0) @map("bonus_points") @db.Decimal(5, 2)
+  finalScore     Decimal      @default(100) @map("final_score") @db.Decimal(5, 2)
+  status         ScoreStatus  @default(CALCULATING)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scoreDetails ScoreDetail[]
+
+  @@unique([userId, yearMonth])
+  @@index([yearMonth])
+  @@map("score_records")
+}
+
+enum ScoreReasonType {
+  LATE
+  EARLY_LEAVE
+  ABSENCE
+  RETRO
+  MISCONDUCT
+  BONUS
+}
+
+model ScoreDetail {
+  id              String          @id @default(uuid())
+  scoreRecordId   String          @map("score_record_id")
+  reasonType      ScoreReasonType @map("reason_type")
+  relatedDate     DateTime?       @map("related_date") @db.Date
+  relatedEventId  String?         @map("related_event_id")
+  pointsDelta     Decimal         @map("points_delta") @db.Decimal(5, 2) // Negative for deduction
+  hasAdvanceNotice Boolean        @default(false) @map("has_advance_notice")
+  notes           String?         @db.Text
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  // Relations
+  scoreRecord ScoreRecord @relation(fields: [scoreRecordId], references: [id], onDelete: Cascade)
+
+  @@index([scoreRecordId])
+  @@map("score_details")
+}
+
+// ============================================
+// Advance Notice System
+// ============================================
+
+enum NoticeType {
+  LATE
+  LEAVE
+}
+
+enum NoticeSource {
+  WEB
+  DISCORD
+  TEAMS
+}
+
+model AdvanceNotice {
+  id              String       @id @default(uuid())
+  userId          String       @map("user_id")
+  noticeType      NoticeType   @map("notice_type")
+  expectedDate    DateTime     @map("expected_date") @db.Date
+  expectedMinutes Int?         @map("expected_minutes") // For late notice
+  reason          String
+  source          NoticeSource @default(WEB)
+  isUsed          Boolean      @default(false) @map("is_used")
+  relatedEventId  String?      @map("related_event_id")
+  createdAt       DateTime     @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expectedDate])
+  @@index([isUsed])
+  @@map("advance_notices")
+}
+
+// ============================================
+// System Configuration
+// ============================================
+
+model SystemConfig {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String   @db.Text // JSON format
+  category    String   // schedule, rules, scoring, security, etc.
+  description String   @db.Text
+  updatedBy   String   @map("updated_by")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  updater User @relation(fields: [updatedBy], references: [id])
+
+  @@index([category])
+  @@map("system_configs")
+}
+
+// ============================================
+// Schedule Change Request
+// ============================================
+
+enum ScheduleChangeType {
+  PERMANENT  // 永久調整班表
+  TEMPORARY  // 臨時調整（單日或單週）
+}
+
+model ScheduleChangeRequest {
+  id              String             @id @default(uuid())
+  userId          String             @map("user_id")
+  type            ScheduleChangeType
+  effectiveFrom   DateTime           @map("effective_from")
+  effectiveTo     DateTime?          @map("effective_to") // For TEMPORARY changes
+  originalSchedule Json              @map("original_schedule")
+  newSchedule     Json               @map("new_schedule")
+  reason          String             @db.Text
+  status          RequestStatus      @default(PENDING)
+  approverId      String?            @map("approver_id")
+  reviewNotes     String?            @map("review_notes") @db.Text
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  // Relations
+  user     User  @relation(fields: [userId], references: [id])
+  approver User? @relation("ScheduleChangeApprover", fields: [approverId], references: [id])
+
+  @@index([userId, status])
+  @@index([effectiveFrom, effectiveTo])
+  @@map("schedule_change_requests")
+}
+
+// ============================================
+// Anomaly Detection
+// ============================================
+
+enum AnomalyType {
+  MISSING_CLOCK_IN
+  MISSING_CLOCK_OUT
+  ABNORMAL_WORK_HOURS_SHORT
+  ABNORMAL_WORK_HOURS_LONG
+  SUSPICIOUS_IP_ACCESS
+  FREQUENT_RETRO_CLOCK
+}
+
+model AnomalyRecord {
+  id          String      @id @default(uuid())
+  userId      String      @map("user_id")
+  type        AnomalyType
+  date        DateTime
+  description String      @db.Text
+  metadata    Json        // IP address, duration, etc.
+  severity    String      // low, medium, high
+  resolved    Boolean     @default(false)
+  resolvedAt  DateTime?   @map("resolved_at")
+  resolvedBy  String?     @map("resolved_by")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  @@index([userId, date])
+  @@index([type, resolved])
+  @@map("anomaly_records")
+}
+
+// ============================================
+// Audit Log
+// ============================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id") // Operator
+  action     String   // approve_leave, reject_retro, adjust_score, etc.
+  targetType String   @map("target_type") // LeaveRequest, ScoreRecord, etc.
+  targetId   String   @map("target_id")
+  changes    Json     // Detailed changes
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([targetType, targetId])
+  @@map("audit_logs")
+}
